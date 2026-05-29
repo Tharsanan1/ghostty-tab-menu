@@ -11,7 +11,7 @@
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Ghostty Tab Menu</string>
+  <string>Zellij Session Menu</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -23,6 +23,6 @@
   <key>LSUIElement</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Ghostty Tab Menu needs to read and focus Ghostty tabs.</string>
+  <string>Zellij Session Menu needs to read and focus Ghostty tabs.</string>
 </dict>
 </plist>

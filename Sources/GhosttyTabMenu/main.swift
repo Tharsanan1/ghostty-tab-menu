@@ -7,6 +7,11 @@ struct GhosttyTab: Equatable {
     let name: String
 }
 
+struct ZellijSession: Equatable {
+    let name: String
+    let isExited: Bool
+}
+
 struct ScriptError: Error {
     let message: String
 }
@@ -14,15 +19,16 @@ struct ScriptError: Error {
 final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
-    private let pinnedNamesKey = "pinnedGhosttyTabNames"
+    private let pinnedNamesKey = "pinnedZellijSessionNames"
     private var currentTabs: [GhosttyTab] = []
+    private var currentSessions: [ZellijSession] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         if let button = statusItem.button {
             button.image = Self.makeMenuBarIcon()
-            button.toolTip = "Ghostty tabs"
+            button.toolTip = "Zellij sessions"
         }
 
         menu.delegate = self
@@ -73,7 +79,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         image.unlockFocus()
         image.isTemplate = true
-        image.accessibilityDescription = "Ghostty tabs"
+        image.accessibilityDescription = "Zellij sessions"
         return image
     }
 
@@ -83,31 +89,32 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildMenu() {
         menu.removeAllItems()
+        currentSessions = loadZellijSessions()
         currentTabs = loadGhosttyTabs()
 
-        guard !currentTabs.isEmpty else {
-            menu.addItem(disabledItem("No Ghostty tabs found"))
+        guard !currentSessions.isEmpty else {
+            menu.addItem(disabledItem("No Zellij sessions found"))
             menu.addItem(NSMenuItem.separator())
             addRefreshAndQuit()
             return
         }
 
         let pinnedNames = loadPinnedNames()
-        let pinnedTabs = currentTabs.filter { pinnedNames.contains($0.name) }
+        let pinnedSessions = currentSessions.filter { pinnedNames.contains($0.name) }
 
-        if !pinnedTabs.isEmpty {
+        if !pinnedSessions.isEmpty {
             menu.addItem(sectionItem("Pinned"))
-            addFocusItems(for: pinnedTabs)
+            addFocusItems(for: pinnedSessions)
             menu.addItem(NSMenuItem.separator())
         }
 
-        menu.addItem(sectionItem("All Ghostty Tabs"))
-        addFocusItems(for: currentTabs)
+        menu.addItem(sectionItem("Zellij Sessions"))
+        addFocusItems(for: currentSessions)
         menu.addItem(NSMenuItem.separator())
 
-        let pinMenuItem = NSMenuItem(title: "Pin / Unpin Tabs", action: nil, keyEquivalent: "")
+        let pinMenuItem = NSMenuItem(title: "Pin / Unpin Sessions", action: nil, keyEquivalent: "")
         let pinSubmenu = NSMenu()
-        for name in uniqueTabNames(currentTabs) {
+        for name in uniqueSessionNames(currentSessions) {
             let item = NSMenuItem(title: name, action: #selector(togglePin(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = name
@@ -120,15 +127,22 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addRefreshAndQuit()
     }
 
-    private func addFocusItems(for tabs: [GhosttyTab]) {
-        let duplicateNames = duplicateTabNames(in: currentTabs)
-        for tab in tabs {
-            let title = duplicateNames.contains(tab.name)
-                ? "\(tab.name)  (window \(tab.windowId), tab \(tab.tabIndex))"
-                : tab.name
-            let item = NSMenuItem(title: title, action: #selector(focusTab(_:)), keyEquivalent: "")
+    private func addFocusItems(for sessions: [ZellijSession]) {
+        for session in sessions {
+            let matchingTab = tabForSession(session)
+            let suffix: String
+            if session.isExited {
+                suffix = "  (exited)"
+            } else if matchingTab == nil {
+                suffix = "  (not open in Ghostty)"
+            } else {
+                suffix = ""
+            }
+
+            let item = NSMenuItem(title: "\(session.name)\(suffix)", action: #selector(focusSession(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = ["windowId": tab.windowId, "tabIndex": String(tab.tabIndex)]
+            item.representedObject = session.name
+            item.isEnabled = matchingTab != nil
             menu.addItem(item)
         }
     }
@@ -140,7 +154,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshItem.target = self
         menu.addItem(refreshItem)
 
-        let quitItem = NSMenuItem(title: "Quit Ghostty Tab Menu", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit Zellij Session Menu", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
@@ -169,13 +183,14 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
-    @objc private func focusTab(_ sender: NSMenuItem) {
-        guard
-            let payload = sender.representedObject as? [String: String],
-            let windowId = payload["windowId"],
-            let tabIndex = payload["tabIndex"],
-            Int(tabIndex) != nil
-        else {
+    @objc private func focusSession(_ sender: NSMenuItem) {
+        guard let sessionName = sender.representedObject as? String else {
+            return
+        }
+
+        currentTabs = loadGhosttyTabs()
+        guard let tab = currentTabs.first(where: { tabMatchesSession($0, sessionName: sessionName) }) else {
+            showError("No active Ghostty tab found for Zellij session \"\(sessionName)\".")
             return
         }
 
@@ -202,10 +217,38 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         end run
         """
 
-        let result = runOsascript(script: script, arguments: [windowId, tabIndex])
+        let result = runOsascript(script: script, arguments: [tab.windowId, String(tab.tabIndex)])
         if case let .failure(error) = result {
             showError(error.message)
         }
+    }
+
+    private func loadZellijSessions() -> [ZellijSession] {
+        let result = runCommand(
+            executable: "/bin/zsh",
+            arguments: ["-lc", "zellij list-sessions --no-formatting"]
+        )
+
+        switch result {
+        case .success(let output):
+            return parseZellijSessions(output)
+        case .failure:
+            return []
+        }
+    }
+
+    private func parseZellijSessions(_ output: String) -> [ZellijSession] {
+        output
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                let text = String(line)
+                guard let createdRange = text.range(of: " [Created ") else {
+                    return nil
+                }
+
+                let name = String(text[..<createdRange.lowerBound])
+                return ZellijSession(name: name, isExited: text.contains("(EXITED"))
+            }
     }
 
     private func loadGhosttyTabs() -> [GhosttyTab] {
@@ -254,10 +297,40 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
     }
 
+    private func tabForSession(_ session: ZellijSession) -> GhosttyTab? {
+        guard !session.isExited else {
+            return nil
+        }
+
+        return currentTabs.first { tabMatchesSession($0, sessionName: session.name) }
+    }
+
+    private func tabMatchesSession(_ tab: GhosttyTab, sessionName: String) -> Bool {
+        let title = tab.name
+
+        if title.compare(sessionName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
+            return true
+        }
+
+        guard let regex = try? NSRegularExpression(
+            pattern: "(^|[^A-Za-z0-9_.-])\(NSRegularExpression.escapedPattern(for: sessionName))($|[^A-Za-z0-9_.-])",
+            options: [.caseInsensitive]
+        ) else {
+            return false
+        }
+
+        let range = NSRange(title.startIndex..<title.endIndex, in: title)
+        return regex.firstMatch(in: title, range: range) != nil
+    }
+
     private func runOsascript(script: String, arguments: [String]) -> Result<String, ScriptError> {
+        runCommand(executable: "/usr/bin/osascript", arguments: ["-e", script] + arguments)
+    }
+
+    private func runCommand(executable: String, arguments: [String]) -> Result<String, ScriptError> {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script] + arguments
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -279,7 +352,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let message = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .failure(ScriptError(message: message.isEmpty ? "osascript failed with status \(process.terminationStatus)" : message))
+        return .failure(ScriptError(message: message.isEmpty ? "\(executable) failed with status \(process.terminationStatus)" : message))
     }
 
     private func loadPinnedNames() -> [String] {
@@ -290,18 +363,10 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(names, forKey: pinnedNamesKey)
     }
 
-    private func uniqueTabNames(_ tabs: [GhosttyTab]) -> [String] {
-        Array(Set(tabs.map(\.name))).sorted {
+    private func uniqueSessionNames(_ sessions: [ZellijSession]) -> [String] {
+        Array(Set(sessions.map(\.name))).sorted {
             $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
         }
-    }
-
-    private func duplicateTabNames(in tabs: [GhosttyTab]) -> Set<String> {
-        var counts: [String: Int] = [:]
-        for tab in tabs {
-            counts[tab.name, default: 0] += 1
-        }
-        return Set(counts.compactMap { $0.value > 1 ? $0.key : nil })
     }
 
     private func sectionItem(_ title: String) -> NSMenuItem {
@@ -324,7 +389,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Ghostty Tab Menu"
+        alert.messageText = "Zellij Session Menu"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
