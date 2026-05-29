@@ -129,20 +129,9 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addFocusItems(for sessions: [ZellijSession]) {
         for session in sessions {
-            let matchingTab = tabForSession(session)
-            let suffix: String
-            if session.isExited {
-                suffix = "  (exited)"
-            } else if matchingTab == nil {
-                suffix = "  (not open in Ghostty)"
-            } else {
-                suffix = ""
-            }
-
-            let item = NSMenuItem(title: "\(session.name)\(suffix)", action: #selector(focusSession(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: session.name, action: #selector(focusSession(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = session.name
-            item.isEnabled = matchingTab != nil
             menu.addItem(item)
         }
     }
@@ -189,35 +178,48 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         currentTabs = loadGhosttyTabs()
-        guard let tab = currentTabs.first(where: { tabMatchesSession($0, sessionName: sessionName) }) else {
-            showError("No active Ghostty tab found for Zellij session \"\(sessionName)\".")
-            return
+        if let tab = currentTabs.first(where: { tabMatchesSession($0, sessionName: sessionName) }) {
+            focusTab(tab)
+        } else {
+            openTab(for: sessionName)
         }
+    }
+
+    private func focusTab(_ tab: GhosttyTab) {
+        let result = runOsascript(script: Self.focusTabScript, arguments: [tab.windowId, String(tab.tabIndex)])
+        if case let .failure(error) = result {
+            showError(error.message)
+        }
+    }
+
+    private func openTab(for sessionName: String) {
+        let attachCommand = "exec zellij attach -- \(shellQuoted(sessionName))"
 
         let script = """
         on run argv
-          set targetWindowId to item 1 of argv
-          set targetTabIndex to (item 2 of argv) as integer
+          set attachCommand to item 1 of argv
 
           tell application "Ghostty"
             activate
+            set cfg to new surface configuration
+            set initial input of cfg to attachCommand & linefeed
 
-            repeat with w in windows
-              if (id of w as text) is targetWindowId then
-                set targetTab to tab targetTabIndex of w
-                activate window w
-                select tab targetTab
-                focus focused terminal of targetTab
-                return
-              end if
-            end repeat
+            if (count of windows) is 0 then
+              set targetWindow to new window with configuration cfg
+              set targetTab to selected tab of targetWindow
+            else
+              set targetWindow to front window
+              set targetTab to new tab in targetWindow with configuration cfg
+            end if
 
-            error "No Ghostty tab found for window " & targetWindowId & ", tab " & targetTabIndex
+            activate window targetWindow
+            select tab targetTab
+            focus focused terminal of targetTab
           end tell
         end run
         """
 
-        let result = runOsascript(script: script, arguments: [tab.windowId, String(tab.tabIndex)])
+        let result = runOsascript(script: script, arguments: [attachCommand])
         if case let .failure(error) = result {
             showError(error.message)
         }
@@ -231,7 +233,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         switch result {
         case .success(let output):
-            return parseZellijSessions(output)
+            return parseZellijSessions(output).filter { !$0.isExited }
         case .failure:
             return []
         }
@@ -297,14 +299,6 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
     }
 
-    private func tabForSession(_ session: ZellijSession) -> GhosttyTab? {
-        guard !session.isExited else {
-            return nil
-        }
-
-        return currentTabs.first { tabMatchesSession($0, sessionName: session.name) }
-    }
-
     private func tabMatchesSession(_ tab: GhosttyTab, sessionName: String) -> Bool {
         let title = tab.name
 
@@ -322,6 +316,33 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let range = NSRange(title.startIndex..<title.endIndex, in: title)
         return regex.firstMatch(in: title, range: range) != nil
     }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private static let focusTabScript = """
+    on run argv
+      set targetWindowId to item 1 of argv
+      set targetTabIndex to (item 2 of argv) as integer
+
+      tell application "Ghostty"
+        activate
+
+        repeat with w in windows
+          if (id of w as text) is targetWindowId then
+            set targetTab to tab targetTabIndex of w
+            activate window w
+            select tab targetTab
+            focus focused terminal of targetTab
+            return
+          end if
+        end repeat
+
+        error "No Ghostty tab found for window " & targetWindowId & ", tab " & targetTabIndex
+      end tell
+    end run
+    """
 
     private func runOsascript(script: String, arguments: [String]) -> Result<String, ScriptError> {
         runCommand(executable: "/usr/bin/osascript", arguments: ["-e", script] + arguments)

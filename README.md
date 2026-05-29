@@ -5,9 +5,9 @@ Small macOS menu bar helper for jumping to Ghostty tabs that are running Zellij 
 ## Behavior
 
 - Shows only a menu bar icon.
-- Lists current Zellij sessions when the icon is clicked.
+- Lists current active Zellij sessions when the icon is clicked.
 - Focuses the Ghostty tab that matches the selected active Zellij session.
-- Marks exited sessions and sessions that are not currently open in a Ghostty tab.
+- Opens a new Ghostty tab and attaches to the selected session when no matching tab is open.
 - Lets you pin session names so matching sessions appear at the top.
 - Keeps pinned names even when the session is temporarily missing.
 
