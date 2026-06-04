@@ -10,18 +10,7 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
 INSTALL_APP="$INSTALL_DIR/$APP_NAME"
 LEGACY_INSTALL_APP="$INSTALL_DIR/$LEGACY_APP_NAME"
 
-rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS"
-
-cp "$ROOT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
-
-swiftc \
-  -O \
-  -framework AppKit \
-  "$ROOT_DIR/Sources/GhosttyTabMenu/main.swift" \
-  -o "$APP_DIR/Contents/MacOS/GhosttyTabMenu"
-
-codesign --force --deep --sign - "$APP_DIR" >/dev/null
+"$ROOT_DIR/scripts/build.sh"
 
 mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_APP"

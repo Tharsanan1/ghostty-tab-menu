@@ -12,6 +12,16 @@ struct ZellijSession: Equatable {
     let isExited: Bool
 }
 
+struct SessionLink: Codable, Equatable {
+    let title: String
+    let url: String
+}
+
+struct SessionLinkPayload {
+    let sessionName: String
+    let link: SessionLink
+}
+
 struct ScriptError: Error {
     let message: String
 }
@@ -20,6 +30,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let pinnedNamesKey = "pinnedZellijSessionNames"
+    private let sessionLinksKey = "zellijSessionLinks"
     private var currentTabs: [GhosttyTab] = []
     private var currentSessions: [ZellijSession] = []
 
@@ -129,11 +140,180 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addFocusItems(for sessions: [ZellijSession]) {
         for session in sessions {
-            let item = NSMenuItem(title: session.name, action: #selector(focusSession(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = session.name
+            let item = NSMenuItem(title: session.name, action: nil, keyEquivalent: "")
+            item.submenu = sessionMenu(for: session.name)
             menu.addItem(item)
         }
+    }
+
+    private func sessionMenu(for sessionName: String) -> NSMenu {
+        let submenu = NSMenu()
+        let links = loadLinks(for: sessionName)
+
+        let focusItem = NSMenuItem(title: "Open / Focus Terminal", action: #selector(focusSession(_:)), keyEquivalent: "")
+        focusItem.target = self
+        focusItem.representedObject = sessionName
+        submenu.addItem(focusItem)
+
+        let openAllItem = NSMenuItem(title: "Open All Links in Chrome", action: #selector(openAllLinks(_:)), keyEquivalent: "")
+        openAllItem.target = self
+        openAllItem.representedObject = sessionName
+        openAllItem.isEnabled = !links.isEmpty
+        submenu.addItem(openAllItem)
+
+        submenu.addItem(NSMenuItem.separator())
+
+        if links.isEmpty {
+            submenu.addItem(disabledItem("No links saved"))
+        } else {
+            submenu.addItem(sectionItem("Links"))
+            for link in links {
+                let item = NSMenuItem(title: link.title, action: #selector(openLink(_:)), keyEquivalent: "")
+                item.target = self
+                item.toolTip = link.url
+                item.representedObject = SessionLinkPayload(sessionName: sessionName, link: link)
+                submenu.addItem(item)
+            }
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+
+        let addItem = NSMenuItem(title: "Add Link from Clipboard", action: #selector(addLinkFromClipboard(_:)), keyEquivalent: "")
+        addItem.target = self
+        addItem.representedObject = sessionName
+        submenu.addItem(addItem)
+
+        let removeMenuItem = NSMenuItem(title: "Remove Link", action: nil, keyEquivalent: "")
+        let removeSubmenu = NSMenu()
+        if links.isEmpty {
+            removeSubmenu.addItem(disabledItem("No links saved"))
+        } else {
+            for link in links {
+                let item = NSMenuItem(title: link.title, action: #selector(removeLink(_:)), keyEquivalent: "")
+                item.target = self
+                item.toolTip = link.url
+                item.representedObject = SessionLinkPayload(sessionName: sessionName, link: link)
+                removeSubmenu.addItem(item)
+            }
+        }
+        removeMenuItem.submenu = removeSubmenu
+        submenu.addItem(removeMenuItem)
+
+        return submenu
+    }
+
+    @objc private func openLink(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? SessionLinkPayload else {
+            return
+        }
+
+        openInChrome(payload.link.url)
+    }
+
+    @objc private func openAllLinks(_ sender: NSMenuItem) {
+        guard let sessionName = sender.representedObject as? String else {
+            return
+        }
+
+        for link in loadLinks(for: sessionName) {
+            openInChrome(link.url)
+        }
+    }
+
+    @objc private func addLinkFromClipboard(_ sender: NSMenuItem) {
+        guard
+            let sessionName = sender.representedObject as? String,
+            let clipboardText = NSPasteboard.general.string(forType: .string),
+            let url = normalizedWebURL(clipboardText)
+        else {
+            showError("Copy a valid http or https URL first, then add it to the session.")
+            return
+        }
+
+        var linksBySession = loadAllLinks()
+        var links = linksBySession[sessionName, default: []]
+        let link = SessionLink(title: titleForURL(url), url: url.absoluteString)
+
+        if links.contains(where: { $0.url == link.url }) {
+            showError("That link is already saved for \"\(sessionName)\".")
+            return
+        }
+
+        links.append(link)
+        linksBySession[sessionName] = links
+        saveAllLinks(linksBySession)
+        rebuildMenu()
+    }
+
+    @objc private func removeLink(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? SessionLinkPayload else {
+            return
+        }
+
+        var linksBySession = loadAllLinks()
+        var links = linksBySession[payload.sessionName, default: []]
+        links.removeAll { $0.url == payload.link.url }
+
+        if links.isEmpty {
+            linksBySession.removeValue(forKey: payload.sessionName)
+        } else {
+            linksBySession[payload.sessionName] = links
+        }
+
+        saveAllLinks(linksBySession)
+        rebuildMenu()
+    }
+
+    private func openInChrome(_ url: String) {
+        let result = runCommand(executable: "/usr/bin/open", arguments: ["-a", "Google Chrome", url])
+        if case let .failure(error) = result {
+            showError(error.message)
+        }
+    }
+
+    private func normalizedWebURL(_ text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            let url = URL(string: trimmed),
+            let scheme = url.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            url.host != nil
+        else {
+            return nil
+        }
+
+        return url
+    }
+
+    private func titleForURL(_ url: URL) -> String {
+        let host = url.host ?? url.absoluteString
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        if path.isEmpty {
+            return host
+        }
+
+        return "\(host)/\(path)"
+    }
+
+    private func loadLinks(for sessionName: String) -> [SessionLink] {
+        loadAllLinks()[sessionName, default: []]
+    }
+
+    private func loadAllLinks() -> [String: [SessionLink]] {
+        guard let data = UserDefaults.standard.data(forKey: sessionLinksKey) else {
+            return [:]
+        }
+
+        return (try? JSONDecoder().decode([String: [SessionLink]].self, from: data)) ?? [:]
+    }
+
+    private func saveAllLinks(_ linksBySession: [String: [SessionLink]]) {
+        guard let data = try? JSONEncoder().encode(linksBySession) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: sessionLinksKey)
     }
 
     private func addRefreshAndQuit() {

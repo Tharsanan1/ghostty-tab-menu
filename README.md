@@ -8,8 +8,26 @@ Small macOS menu bar helper for jumping to Ghostty tabs that are running Zellij 
 - Lists current active Zellij sessions when the icon is clicked.
 - Focuses the Ghostty tab that matches the selected active Zellij session.
 - Opens a new Ghostty tab and attaches to the selected session when no matching tab is open.
+- Lets each session save links such as issues, pull requests, CI runs, and docs.
+- Opens saved session links in Google Chrome individually or all at once.
 - Lets you pin session names so matching sessions appear at the top.
 - Keeps pinned names even when the session is temporarily missing.
+
+## Build and Run
+
+```bash
+./scripts/build.sh
+open "./build/Zellij Session Menu.app"
+```
+
+The first time it talks to Ghostty, macOS may ask for Automation permission.
+Allow access so the helper can read and focus Ghostty tabs. The app also needs
+`zellij` to be available from your login shell path.
+
+## Links
+
+Copy a URL, open a session submenu, then choose "Add Link from Clipboard".
+Saved links are stored locally in user defaults and keyed by Zellij session name.
 
 ## Install
 
@@ -17,10 +35,6 @@ Small macOS menu bar helper for jumping to Ghostty tabs that are running Zellij 
 ./scripts/install.sh
 open "$HOME/Applications/Zellij Session Menu.app"
 ```
-
-The first time it talks to Ghostty, macOS may ask for Automation permission.
-Allow access so the helper can read and focus Ghostty tabs. The app also needs
-`zellij` to be available from your login shell path.
 
 ## Uninstall
 
