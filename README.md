@@ -26,7 +26,8 @@ Allow access so the helper can read and focus Ghostty tabs. The app also needs
 
 ## Links
 
-Copy a URL, open a session submenu, then choose "Add Link from Clipboard".
+Copy one URL, or multiple comma- or newline-separated URLs, open a session
+submenu, then choose "Add Link from Clipboard".
 Saved links are stored locally in user defaults and keyed by Zellij session name.
 
 ## Install

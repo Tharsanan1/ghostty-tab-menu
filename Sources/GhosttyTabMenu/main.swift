@@ -223,23 +223,44 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func addLinkFromClipboard(_ sender: NSMenuItem) {
         guard
             let sessionName = sender.representedObject as? String,
-            let clipboardText = NSPasteboard.general.string(forType: .string),
-            let url = normalizedWebURL(clipboardText)
+            let clipboardText = NSPasteboard.general.string(forType: .string)
         else {
-            showError("Copy a valid http or https URL first, then add it to the session.")
+            showError("Copy one or more http or https URLs first, then add them to the session.")
+            return
+        }
+
+        let clipboardURLs = webURLs(from: clipboardText)
+        guard !clipboardURLs.isEmpty else {
+            showError("Copy one or more comma- or newline-separated http or https URLs first.")
             return
         }
 
         var linksBySession = loadAllLinks()
         var links = linksBySession[sessionName, default: []]
-        let link = SessionLink(title: titleForURL(url), url: url.absoluteString)
+        let existingURLs = Set(links.map(\.url))
+        var urlsToAdd: [URL] = []
+        var seenURLs: Set<String> = []
 
-        if links.contains(where: { $0.url == link.url }) {
-            showError("That link is already saved for \"\(sessionName)\".")
+        for url in clipboardURLs {
+            guard !existingURLs.contains(url.absoluteString),
+                  !seenURLs.contains(url.absoluteString)
+            else {
+                continue
+            }
+
+            seenURLs.insert(url.absoluteString)
+            urlsToAdd.append(url)
+        }
+
+        guard !urlsToAdd.isEmpty else {
+            showError("Those links are already saved for \"\(sessionName)\".")
             return
         }
 
-        links.append(link)
+        for url in urlsToAdd {
+            links.append(SessionLink(title: titleForURL(url), url: url.absoluteString))
+        }
+
         linksBySession[sessionName] = links
         saveAllLinks(linksBySession)
         rebuildMenu()
@@ -271,18 +292,22 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func normalizedWebURL(_ text: String) -> URL? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard
-            let url = URL(string: trimmed),
-            let scheme = url.scheme?.lowercased(),
-            scheme == "http" || scheme == "https",
-            url.host != nil
-        else {
-            return nil
-        }
+    private func webURLs(from text: String) -> [URL] {
+        text
+            .components(separatedBy: CharacterSet(charactersIn: ",\n\r"))
+            .compactMap { token in
+                let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard
+                    let url = URL(string: trimmed),
+                    let scheme = url.scheme?.lowercased(),
+                    scheme == "http" || scheme == "https",
+                    url.host != nil
+                else {
+                    return nil
+                }
 
-        return url
+                return url
+            }
     }
 
     private func titleForURL(_ url: URL) -> String {
