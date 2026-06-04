@@ -84,6 +84,13 @@ struct PullRequestSnapshot: Codable, Equatable {
     let updatedAt: String
 }
 
+struct PullRequestActivity: Codable, Equatable {
+    let displayName: String
+    let message: String
+    let updatedAt: String
+    let url: String
+}
+
 struct ScriptError: Error {
     let message: String
 }
@@ -94,6 +101,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let pinnedNamesKey = "pinnedZellijSessionNames"
     private let sessionLinksKey = "zellijSessionLinks"
     private let prSnapshotsKey = "githubPRSnapshots"
+    private let prActivitiesKey = "githubPRActivities"
     private var prPollTimer: Timer?
     private var isCheckingPullRequests = false
     private var currentTabs: [GhosttyTab] = []
@@ -207,7 +215,9 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addFocusItems(for sessions: [ZellijSession]) {
         for session in sessions {
-            let item = NSMenuItem(title: session.name, action: nil, keyEquivalent: "")
+            let activities = loadActivities(for: session.name)
+            let title = activities.isEmpty ? session.name : "\(session.name)  (\(activities.count) new)"
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.submenu = sessionMenu(for: session.name)
             menu.addItem(item)
         }
@@ -216,6 +226,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func sessionMenu(for sessionName: String) -> NSMenu {
         let submenu = NSMenu()
         let links = loadLinks(for: sessionName)
+        let activities = loadActivities(for: sessionName)
 
         let focusItem = NSMenuItem(title: "Open / Focus Terminal", action: #selector(focusSession(_:)), keyEquivalent: "")
         focusItem.target = self
@@ -229,6 +240,24 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         submenu.addItem(openAllItem)
 
         submenu.addItem(NSMenuItem.separator())
+
+        if !activities.isEmpty {
+            submenu.addItem(sectionItem("PR Activity"))
+            for activity in activities {
+                let link = SessionLink(title: activity.displayName, url: activity.url)
+                let item = NSMenuItem(title: "\(activity.displayName) - \(activity.message)", action: #selector(openLink(_:)), keyEquivalent: "")
+                item.target = self
+                item.toolTip = activity.url
+                item.representedObject = SessionLinkPayload(sessionName: sessionName, link: link)
+                submenu.addItem(item)
+            }
+
+            let clearItem = NSMenuItem(title: "Clear PR Activity", action: #selector(clearSessionActivities(_:)), keyEquivalent: "")
+            clearItem.target = self
+            clearItem.representedObject = sessionName
+            submenu.addItem(clearItem)
+            submenu.addItem(NSMenuItem.separator())
+        }
 
         if links.isEmpty {
             submenu.addItem(disabledItem("No links saved"))
@@ -275,6 +304,8 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         openInChrome(payload.link.url)
+        clearActivity(sessionName: payload.sessionName, url: payload.link.url)
+        rebuildMenu()
     }
 
     @objc private func openAllLinks(_ sender: NSMenuItem) {
@@ -349,6 +380,18 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         saveAllLinks(linksBySession)
+        clearActivity(sessionName: payload.sessionName, url: payload.link.url)
+        rebuildMenu()
+    }
+
+    @objc private func clearSessionActivities(_ sender: NSMenuItem) {
+        guard let sessionName = sender.representedObject as? String else {
+            return
+        }
+
+        var activities = loadAllActivities()
+        activities.removeValue(forKey: sessionName)
+        saveAllActivities(activities)
         rebuildMenu()
     }
 
@@ -408,6 +451,56 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(data, forKey: sessionLinksKey)
     }
 
+    private func loadActivities(for sessionName: String) -> [PullRequestActivity] {
+        loadAllActivities()[sessionName, default: []].sorted {
+            $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    private func loadAllActivities() -> [String: [PullRequestActivity]] {
+        guard let data = UserDefaults.standard.data(forKey: prActivitiesKey) else {
+            return [:]
+        }
+
+        return (try? JSONDecoder().decode([String: [PullRequestActivity]].self, from: data)) ?? [:]
+    }
+
+    private func saveAllActivities(_ activitiesBySession: [String: [PullRequestActivity]]) {
+        guard let data = try? JSONEncoder().encode(activitiesBySession) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: prActivitiesKey)
+    }
+
+    private func saveActivity(sessionName: String, status: PullRequestStatus, message: String) {
+        var activitiesBySession = loadAllActivities()
+        var activities = activitiesBySession[sessionName, default: []]
+        activities.removeAll { $0.url == status.url }
+        activities.append(PullRequestActivity(
+            displayName: status.displayName,
+            message: message,
+            updatedAt: status.updatedAt,
+            url: status.url
+        ))
+        activitiesBySession[sessionName] = activities
+        saveAllActivities(activitiesBySession)
+    }
+
+    private func clearActivity(sessionName: String, url: String) {
+        var activitiesBySession = loadAllActivities()
+        var activities = activitiesBySession[sessionName, default: []]
+        activities.removeAll { $0.url == url }
+
+        if activities.isEmpty {
+            activitiesBySession.removeValue(forKey: sessionName)
+        } else {
+            activitiesBySession[sessionName] = activities
+        }
+
+        saveAllActivities(activitiesBySession)
+    }
+
     private func startPullRequestPolling() {
         prPollTimer?.invalidate()
         prPollTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -447,10 +540,12 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                 if let oldSnapshot,
                    oldSnapshot.fingerprint != newSnapshot.fingerprint {
+                    let message = self.pullRequestChangeDescription(status: status, oldSnapshot: oldSnapshot)
+                    self.saveActivity(sessionName: pullRequestLink.sessionName, status: status, message: message)
                     self.notifyPullRequestChanged(
                         sessionName: pullRequestLink.sessionName,
                         status: status,
-                        oldSnapshot: oldSnapshot
+                        message: message
                     )
                 }
 
@@ -461,6 +556,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             DispatchQueue.main.async {
                 self.isCheckingPullRequests = false
+                self.rebuildMenu()
             }
         }
     }
@@ -501,12 +597,12 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func notifyPullRequestChanged(
         sessionName: String,
         status: PullRequestStatus,
-        oldSnapshot: PullRequestSnapshot
+        message: String
     ) {
         displayNotification(
             title: sessionName,
             subtitle: "PR changed: \(status.displayName)",
-            body: pullRequestChangeDescription(status: status, oldSnapshot: oldSnapshot)
+            body: message
         )
     }
 

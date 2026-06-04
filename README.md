@@ -11,6 +11,7 @@ Small macOS menu bar helper for jumping to Ghostty tabs that are running Zellij 
 - Lets each session save links such as issues, pull requests, CI runs, and docs.
 - Opens saved session links in Google Chrome individually or all at once.
 - Polls saved GitHub PR links every 30 seconds with `gh` and notifies when PR activity changes.
+- Marks sessions with unread PR activity until the changed PR link is opened or cleared.
 - Lets you pin session names so matching sessions appear at the top.
 - Keeps pinned names even when the session is temporarily missing.
 
