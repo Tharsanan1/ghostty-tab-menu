@@ -418,7 +418,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
 
     private func startPullRequestPolling() {
         prPollTimer?.invalidate()
-        prPollTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+        prPollTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.checkPullRequests()
         }
 
