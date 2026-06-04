@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UserNotifications
 
 struct GhosttyTab: Equatable {
     let windowId: String
@@ -22,15 +23,80 @@ struct SessionLinkPayload {
     let link: SessionLink
 }
 
+struct PullRequestLink {
+    let sessionName: String
+    let url: String
+}
+
+struct PullRequestReview: Codable, Equatable {
+    let author: PullRequestAuthor?
+    let state: String?
+    let submittedAt: String?
+}
+
+struct PullRequestAuthor: Codable, Equatable {
+    let login: String?
+}
+
+struct PullRequestStatus: Codable, Equatable {
+    let isDraft: Bool
+    let latestReviews: [PullRequestReview]
+    let mergedAt: String?
+    let reviewDecision: String?
+    let state: String
+    let title: String
+    let updatedAt: String
+    let url: String
+
+    var fingerprint: String {
+        let reviewFingerprint = latestReviews
+            .map { "\($0.author?.login ?? ""):\($0.state ?? ""):\($0.submittedAt ?? "")" }
+            .joined(separator: "|")
+
+        return [
+            updatedAt,
+            state,
+            isDraft ? "draft" : "ready",
+            mergedAt ?? "",
+            reviewDecision ?? "",
+            reviewFingerprint,
+        ].joined(separator: "\t")
+    }
+
+    var displayName: String {
+        guard let parsedURL = URL(string: url) else {
+            return url
+        }
+
+        let parts = parsedURL.path.split(separator: "/")
+        guard parts.count >= 4 else {
+            return parsedURL.host ?? url
+        }
+
+        return "\(parts[0])/\(parts[1])#\(parts[3])"
+    }
+}
+
+struct PullRequestSnapshot: Codable, Equatable {
+    let fingerprint: String
+    let reviewDecision: String?
+    let state: String
+    let title: String
+    let updatedAt: String
+}
+
 struct ScriptError: Error {
     let message: String
 }
 
-final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let pinnedNamesKey = "pinnedZellijSessionNames"
     private let sessionLinksKey = "zellijSessionLinks"
+    private let prSnapshotsKey = "githubPRSnapshots"
+    private var prPollTimer: Timer?
+    private var isCheckingPullRequests = false
     private var currentTabs: [GhosttyTab] = []
     private var currentSessions: [ZellijSession] = []
 
@@ -44,6 +110,9 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.delegate = self
         statusItem.menu = menu
+
+        configureNotifications()
+        startPullRequestPolling()
     }
 
     private static func makeMenuBarIcon() -> NSImage {
@@ -341,12 +410,179 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(data, forKey: sessionLinksKey)
     }
 
+    private func configureNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func startPullRequestPolling() {
+        prPollTimer?.invalidate()
+        prPollTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            self?.checkPullRequests()
+        }
+
+        checkPullRequests()
+    }
+
+    private func checkPullRequests() {
+        guard !isCheckingPullRequests else {
+            return
+        }
+
+        isCheckingPullRequests = true
+        let pullRequestLinks = savedPullRequestLinks()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+
+            var snapshots = self.loadPullRequestSnapshots()
+
+            for pullRequestLink in pullRequestLinks {
+                guard let status = self.loadPullRequestStatus(url: pullRequestLink.url) else {
+                    continue
+                }
+
+                let key = self.snapshotKey(for: pullRequestLink)
+                let oldSnapshot = snapshots[key]
+                let newSnapshot = PullRequestSnapshot(
+                    fingerprint: status.fingerprint,
+                    reviewDecision: status.reviewDecision,
+                    state: status.state,
+                    title: status.title,
+                    updatedAt: status.updatedAt
+                )
+
+                if let oldSnapshot,
+                   oldSnapshot.fingerprint != newSnapshot.fingerprint {
+                    self.notifyPullRequestChanged(
+                        sessionName: pullRequestLink.sessionName,
+                        status: status,
+                        oldSnapshot: oldSnapshot
+                    )
+                }
+
+                snapshots[key] = newSnapshot
+            }
+
+            self.savePullRequestSnapshots(snapshots)
+
+            DispatchQueue.main.async {
+                self.isCheckingPullRequests = false
+            }
+        }
+    }
+
+    private func savedPullRequestLinks() -> [PullRequestLink] {
+        loadAllLinks().flatMap { sessionName, links in
+            links.compactMap { link in
+                isGitHubPullRequestURL(link.url) ? PullRequestLink(sessionName: sessionName, url: link.url) : nil
+            }
+        }
+    }
+
+    private func isGitHubPullRequestURL(_ text: String) -> Bool {
+        guard let url = URL(string: text),
+              url.host?.lowercased() == "github.com"
+        else {
+            return false
+        }
+
+        let parts = url.path.split(separator: "/")
+        return parts.count >= 4 && parts[2] == "pull" && Int(parts[3]) != nil
+    }
+
+    private func loadPullRequestStatus(url: String) -> PullRequestStatus? {
+        let fields = "url,title,updatedAt,reviewDecision,state,isDraft,mergedAt,latestReviews"
+        let command = "gh pr view \(shellQuoted(url)) --json \(fields)"
+        let result = runCommand(executable: "/bin/zsh", arguments: ["-lc", command])
+
+        guard case let .success(output) = result,
+              let data = output.data(using: .utf8)
+        else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(PullRequestStatus.self, from: data)
+    }
+
+    private func notifyPullRequestChanged(
+        sessionName: String,
+        status: PullRequestStatus,
+        oldSnapshot: PullRequestSnapshot
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = sessionName
+        content.subtitle = "PR changed: \(status.displayName)"
+        content.body = pullRequestChangeDescription(status: status, oldSnapshot: oldSnapshot)
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "pr-\(sessionName)-\(status.url)-\(status.updatedAt)",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func pullRequestChangeDescription(
+        status: PullRequestStatus,
+        oldSnapshot: PullRequestSnapshot
+    ) -> String {
+        if oldSnapshot.state != status.state {
+            return "State changed to \(status.state.lowercased())."
+        }
+
+        if oldSnapshot.reviewDecision != status.reviewDecision {
+            let decision = status.reviewDecision?.isEmpty == false ? status.reviewDecision! : "review pending"
+            return "Review status changed to \(decision.lowercased())."
+        }
+
+        if status.mergedAt != nil {
+            return "PR was merged."
+        }
+
+        return "New PR activity: comment, review, commit, or metadata update."
+    }
+
+    private func snapshotKey(for pullRequestLink: PullRequestLink) -> String {
+        "\(pullRequestLink.sessionName)\t\(pullRequestLink.url)"
+    }
+
+    private func loadPullRequestSnapshots() -> [String: PullRequestSnapshot] {
+        guard let data = UserDefaults.standard.data(forKey: prSnapshotsKey) else {
+            return [:]
+        }
+
+        return (try? JSONDecoder().decode([String: PullRequestSnapshot].self, from: data)) ?? [:]
+    }
+
+    private func savePullRequestSnapshots(_ snapshots: [String: PullRequestSnapshot]) {
+        guard let data = try? JSONEncoder().encode(snapshots) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: prSnapshotsKey)
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
     private func addRefreshAndQuit() {
         menu.addItem(NSMenuItem.separator())
 
         let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refreshMenu), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
+
+        let checkPRsItem = NSMenuItem(title: "Check PRs Now", action: #selector(checkPullRequestsNow), keyEquivalent: "")
+        checkPRsItem.target = self
+        menu.addItem(checkPRsItem)
 
         let quitItem = NSMenuItem(title: "Quit Zellij Session Menu", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
@@ -356,6 +592,10 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func refreshMenu() {
         rebuildMenu()
         statusItem.button?.performClick(nil)
+    }
+
+    @objc private func checkPullRequestsNow() {
+        checkPullRequests()
     }
 
     @objc private func quit() {

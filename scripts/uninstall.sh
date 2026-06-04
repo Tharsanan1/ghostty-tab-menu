@@ -21,4 +21,5 @@ fi
 
 defaults delete local.ghostty-tab-menu pinnedZellijSessionNames 2>/dev/null || true
 defaults delete local.ghostty-tab-menu zellijSessionLinks 2>/dev/null || true
+defaults delete local.ghostty-tab-menu githubPRSnapshots 2>/dev/null || true
 defaults delete local.ghostty-tab-menu pinnedGhosttyTabNames 2>/dev/null || true
