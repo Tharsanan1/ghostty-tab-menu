@@ -473,8 +473,12 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(data, forKey: prActivitiesKey)
     }
 
-    private func saveActivity(sessionName: String, status: PullRequestStatus, message: String) {
-        var activitiesBySession = loadAllActivities()
+    private func saveActivity(
+        sessionName: String,
+        status: PullRequestStatus,
+        message: String,
+        in activitiesBySession: inout [String: [PullRequestActivity]]
+    ) {
         var activities = activitiesBySession[sessionName, default: []]
         activities.removeAll { $0.url == status.url }
         activities.append(PullRequestActivity(
@@ -484,7 +488,6 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             url: status.url
         ))
         activitiesBySession[sessionName] = activities
-        saveAllActivities(activitiesBySession)
     }
 
     private func clearActivity(sessionName: String, url: String) {
@@ -522,6 +525,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
 
             var snapshots = self.loadPullRequestSnapshots()
+            var activities = self.loadAllActivities()
 
             for pullRequestLink in pullRequestLinks {
                 guard let status = self.loadPullRequestStatus(url: pullRequestLink.url) else {
@@ -541,7 +545,12 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let oldSnapshot,
                    oldSnapshot.fingerprint != newSnapshot.fingerprint {
                     let message = self.pullRequestChangeDescription(status: status, oldSnapshot: oldSnapshot)
-                    self.saveActivity(sessionName: pullRequestLink.sessionName, status: status, message: message)
+                    self.saveActivity(
+                        sessionName: pullRequestLink.sessionName,
+                        status: status,
+                        message: message,
+                        in: &activities
+                    )
                     self.notifyPullRequestChanged(
                         sessionName: pullRequestLink.sessionName,
                         status: status,
@@ -553,6 +562,7 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             self.savePullRequestSnapshots(snapshots)
+            self.saveAllActivities(activities)
 
             DispatchQueue.main.async {
                 self.isCheckingPullRequests = false
