@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import UserNotifications
 
 struct GhosttyTab: Equatable {
     let windowId: String
@@ -89,7 +88,7 @@ struct ScriptError: Error {
     let message: String
 }
 
-final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
+final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let pinnedNamesKey = "pinnedZellijSessionNames"
@@ -111,7 +110,6 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         menu.delegate = self
         statusItem.menu = menu
 
-        configureNotifications()
         startPullRequestPolling()
     }
 
@@ -410,12 +408,6 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         UserDefaults.standard.set(data, forKey: sessionLinksKey)
     }
 
-    private func configureNotifications() {
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
     private func startPullRequestPolling() {
         prPollTimer?.invalidate()
         prPollTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -511,19 +503,11 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         status: PullRequestStatus,
         oldSnapshot: PullRequestSnapshot
     ) {
-        let content = UNMutableNotificationContent()
-        content.title = sessionName
-        content.subtitle = "PR changed: \(status.displayName)"
-        content.body = pullRequestChangeDescription(status: status, oldSnapshot: oldSnapshot)
-        content.sound = .default
-
-        let request = UNNotificationRequest(
-            identifier: "pr-\(sessionName)-\(status.url)-\(status.updatedAt)",
-            content: content,
-            trigger: nil
+        displayNotification(
+            title: sessionName,
+            subtitle: "PR changed: \(status.displayName)",
+            body: pullRequestChangeDescription(status: status, oldSnapshot: oldSnapshot)
         )
-
-        UNUserNotificationCenter.current().add(request)
     }
 
     private func pullRequestChangeDescription(
@@ -566,11 +550,14 @@ final class GhosttyTabMenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate, 
         UserDefaults.standard.set(data, forKey: prSnapshotsKey)
     }
 
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+    private func displayNotification(title: String, subtitle: String, body: String) {
+        let script = """
+        on run argv
+          display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv) sound name "Glass"
+        end run
+        """
+
+        _ = runOsascript(script: script, arguments: [title, subtitle, body])
     }
 
     private func addRefreshAndQuit() {
